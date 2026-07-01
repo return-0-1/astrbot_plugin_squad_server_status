@@ -335,9 +335,15 @@ class SquadServerStatusPlugin(Star):
         keyword = None
 
         if message_str:
-            parts = message_str.split("/squad_server", 1)
-            if len(parts) > 1:
-                keyword = parts[1].strip()
+            if "/squad_server" in message_str:
+                parts = message_str.split("/squad_server", 1)
+                if len(parts) > 1:
+                    keyword = parts[1].strip()
+            else:
+                keyword = message_str.strip()
+
+        if keyword == "":
+            keyword = None
 
         results = await self.handle_query(keyword)
         for result in results:
@@ -350,9 +356,15 @@ class SquadServerStatusPlugin(Star):
         keyword = None
 
         if message_str:
-            parts = message_str.split("/战术小队服务器", 1)
-            if len(parts) > 1:
-                keyword = parts[1].strip()
+            if "/战术小队服务器" in message_str:
+                parts = message_str.split("/战术小队服务器", 1)
+                if len(parts) > 1:
+                    keyword = parts[1].strip()
+            else:
+                keyword = message_str.strip()
+
+        if keyword == "":
+            keyword = None
 
         results = await self.handle_query(keyword)
         for result in results:
