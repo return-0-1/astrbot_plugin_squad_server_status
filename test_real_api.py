@@ -83,6 +83,7 @@ class SquadServerStatusCore:
         ping_threshold = self.config.get("ping_threshold", 200)
         min_players = self.config.get("min_players", 60)
         max_results = self.config.get("max_results", 10)
+        cn_only = self.config.get("cn_only", True)
 
         filtered = []
         for server in servers:
@@ -105,6 +106,9 @@ class SquadServerStatusCore:
                 if not name:
                     continue
 
+                if cn_only and not self._contains_chinese(name):
+                    continue
+
                 if keyword:
                     if keyword.lower() not in name.lower():
                         continue
@@ -120,6 +124,12 @@ class SquadServerStatusCore:
 
         filtered.sort(key=lambda s: int(s.get("players", 0)), reverse=True)
         return filtered[:max_results]
+
+    def _contains_chinese(self, text):
+        for char in text:
+            if '\u4e00' <= char <= '\u9fff':
+                return True
+        return False
 
     def format_server_info(self, server):
         name = server.get("name", "未知服务器")
@@ -209,7 +219,8 @@ async def test_real_api():
         min_players=60,
         max_results=10,
         show_extra_fields=True,
-        extra_fields=["map", "mode"]
+        extra_fields=["map", "mode"],
+        cn_only=True
     )
     
     plugin = SquadServerStatusCore(config)
@@ -229,7 +240,8 @@ async def test_real_api_with_keyword():
         min_players=0,
         max_results=10,
         show_extra_fields=True,
-        extra_fields=["map", "mode"]
+        extra_fields=["map", "mode"],
+        cn_only=True
     )
     
     plugin = SquadServerStatusCore(config)

@@ -41,5 +41,11 @@
         "type": "bool",
         "hint": "当所有API源都不可用时，是否自动切换到模拟数据模式",
         "default": true
+    },
+    "cn_only": {
+        "description": "仅显示中文服务器",
+        "type": "bool",
+        "hint": "开启后只返回服务器名称包含中文字符的服务器",
+        "default": true
     }
 }

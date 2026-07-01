@@ -250,6 +250,7 @@ class SquadServerStatusPlugin(Star):
         ping_threshold = self.config.get("ping_threshold", 200)
         min_players = self.config.get("min_players", 60)
         max_results = self.config.get("max_results", 10)
+        cn_only = self.config.get("cn_only", True)
 
         filtered = []
         for server in servers:
@@ -272,6 +273,9 @@ class SquadServerStatusPlugin(Star):
                 if not name:
                     continue
 
+                if cn_only and not self._contains_chinese(name):
+                    continue
+
                 if keyword:
                     if keyword.lower() not in name.lower():
                         continue
@@ -288,6 +292,12 @@ class SquadServerStatusPlugin(Star):
 
         filtered.sort(key=lambda s: int(s.get("players", 0)), reverse=True)
         return filtered[:max_results]
+
+    def _contains_chinese(self, text):
+        for char in text:
+            if '\u4e00' <= char <= '\u9fff':
+                return True
+        return False
 
     def format_server_info(self, server):
         name = server.get("name", "未知服务器")
@@ -339,6 +349,8 @@ class SquadServerStatusPlugin(Star):
                 parts = message_str.split("/squad_server", 1)
                 if len(parts) > 1:
                     keyword = parts[1].strip()
+            elif message_str.startswith("squad_server"):
+                keyword = message_str[len("squad_server"):].strip()
             else:
                 keyword = message_str.strip()
 
@@ -360,6 +372,8 @@ class SquadServerStatusPlugin(Star):
                 parts = message_str.split("/战术小队服务器", 1)
                 if len(parts) > 1:
                     keyword = parts[1].strip()
+            elif message_str.startswith("战术小队服务器"):
+                keyword = message_str[len("战术小队服务器"):].strip()
             else:
                 keyword = message_str.strip()
 

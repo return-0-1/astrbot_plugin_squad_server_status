@@ -68,6 +68,7 @@
 | `extra_fields` | ["map", "mode"] | 额外显示的字段列表 |
 | `debug_mode` | false | 调试模式，启用后使用模拟数据 |
 | `fallback_to_mock` | true | API 失败时自动使用模拟数据 |
+| `cn_only` | true | 仅显示中文服务器，开启后只返回服务器名称包含中文字符的服务器 |
 
 ### 配置示例
 
@@ -79,7 +80,8 @@
     "show_extra_fields": true,
     "extra_fields": ["map", "mode", "version"],
     "debug_mode": false,
-    "fallback_to_mock": true
+    "fallback_to_mock": true,
+    "cn_only": true
 }
 ```
 
