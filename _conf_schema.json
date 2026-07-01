@@ -1,0 +1,45 @@
+{
+    "ping_threshold": {
+        "description": "Ping阈值(ms)",
+        "type": "int",
+        "hint": "仅返回Ping小于此值的服务器",
+        "default": 200
+    },
+    "min_players": {
+        "description": "无参数时最低人数门槛",
+        "type": "int",
+        "hint": "不带参数查询时，仅返回人数大于等于此值的服务器",
+        "default": 60
+    },
+    "max_results": {
+        "description": "最大返回条数",
+        "type": "int",
+        "hint": "单次查询最多返回的服务器数量",
+        "default": 10
+    },
+    "show_extra_fields": {
+        "description": "是否显示额外字段",
+        "type": "bool",
+        "hint": "开启后可选择显示地图、模式、版本等额外信息",
+        "default": false
+    },
+    "extra_fields": {
+        "description": "额外显示字段",
+        "type": "list",
+        "hint": "选择要额外显示的字段，包括：map(地图)、mode(模式)、version(版本)、queue(排队人数)、ip(服务器IP)",
+        "options": ["map", "mode", "version", "queue", "ip"],
+        "default": ["map", "mode"]
+    },
+    "debug_mode": {
+        "description": "调试模式",
+        "type": "bool",
+        "hint": "开启后使用模拟数据进行测试，不调用真实API",
+        "default": false
+    },
+    "fallback_to_mock": {
+        "description": "API失败时使用模拟数据",
+        "type": "bool",
+        "hint": "当所有API源都不可用时，是否自动切换到模拟数据模式",
+        "default": true
+    }
+}
