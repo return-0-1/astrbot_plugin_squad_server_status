@@ -262,11 +262,9 @@ class SquadServerStatusPlugin(Star):
                 players = int(server.get("players", 0))
                 max_players = int(server.get("max_players", 0))
                 status = str(server.get("status", "")).lower()
+                queue = int(server.get("queue", 0))
 
                 if status != "online":
-                    continue
-
-                if ping >= ping_threshold and ping != 999:
                     continue
 
                 name = server.get("name", "")
@@ -280,9 +278,13 @@ class SquadServerStatusPlugin(Star):
                     if keyword.lower() not in name.lower():
                         continue
                 else:
+                    if ping >= ping_threshold and ping != 999:
+                        continue
                     if players < min_players:
                         continue
                     if players >= max_players:
+                        continue
+                    if queue > 0:
                         continue
 
                 filtered.append(server)
