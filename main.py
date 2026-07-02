@@ -5,6 +5,40 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star
 from astrbot.api import logger
 from astrbot.api import AstrBotConfig
+from pydantic import Field
+from pydantic.dataclasses import dataclass
+from astrbot.core.agent.tool import FunctionTool, ToolExecResult
+from astrbot.core.astr_agent_context import AstrAgentContext
+from astrbot.core.agent.run_context import ContextWrapper
+
+@dataclass
+class SquadServerTool(FunctionTool[AstrAgentContext]):
+    name: str = "query_squad_server"
+    description: str = "查询战术小队(Squad)服务器状态，可按关键词搜索或返回所有活跃服务器"
+    parameters: dict = Field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "keyword": {
+                    "type": "string",
+                    "description": "服务器名称关键字，不填则返回所有活跃服务器"
+                }
+            },
+            "required": []
+        }
+    )
+
+    async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> ToolExecResult:
+        plugin = context.get_plugin("SquadServerStatusPlugin")
+        if not plugin:
+            return ToolExecResult(success=False, content="插件未加载")
+        
+        keyword = kwargs.get("keyword", None)
+        if keyword == "":
+            keyword = None
+        
+        results = await plugin.handle_query(keyword)
+        return ToolExecResult(success=True, content="\n".join(results))
 
 class SquadServerStatusPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -16,6 +50,12 @@ class SquadServerStatusPlugin(Star):
         ]
         self.cache = {}
         self.cache_time = 0
+        
+        try:
+            self.context.add_llm_tools([SquadServerTool()])
+            logger.info("Squad服务器查询工具已注册到LLM")
+        except Exception as e:
+            logger.warning(f"注册LLM工具失败: {e}")
 
     def get_mock_servers(self):
         return [
