@@ -37,6 +37,7 @@ class SquadServerStatusCore:
         ping_threshold = self.config.get("ping_threshold", 200)
         min_players = self.config.get("min_players", 60)
         max_results = self.config.get("max_results", 10)
+        cn_only = self.config.get("cn_only", True)
 
         filtered = []
         for server in servers:
@@ -48,9 +49,7 @@ class SquadServerStatusCore:
                 players = int(server.get("players", 0))
                 max_players = int(server.get("max_players", 0))
                 status = str(server.get("status", "")).lower()
-
-                if ping >= ping_threshold:
-                    continue
+                queue = int(server.get("queue", 0))
 
                 if status != "online":
                     continue
@@ -59,13 +58,20 @@ class SquadServerStatusCore:
                 if not name:
                     continue
 
+                if cn_only and not self._contains_chinese(name):
+                    continue
+
                 if keyword:
                     if keyword.lower() not in name.lower():
                         continue
                 else:
+                    if ping >= ping_threshold and ping != 999:
+                        continue
                     if players < min_players:
                         continue
                     if players >= max_players:
+                        continue
+                    if queue > 0:
                         continue
 
                 filtered.append(server)
@@ -74,6 +80,12 @@ class SquadServerStatusCore:
 
         filtered.sort(key=lambda s: int(s.get("players", 0)), reverse=True)
         return filtered[:max_results]
+
+    def _contains_chinese(self, text):
+        for char in text:
+            if "\u4e00" <= char <= "\u9fff":
+                return True
+        return False
 
     def format_server_info(self, server):
         name = server.get("name", "未知服务器")

@@ -1,5 +1,8 @@
 name: astrbot_plugin_squad_server_status
 desc: 查询战术小队(Squad)服务器状态
 author: AstrBot Dev
-version: 1.0.2
+version: 1.0.3
 repo: https://github.com/AstrBotDevs/astrbot_plugin_squad_server_status
+display_name: Squad服务器状态
+short_desc: 查询战术小队(Squad)游戏服务器实时状态
+astrbot_version: ">=4.16"

@@ -1,5 +1,22 @@
 # 更新日志
 
+## [1.0.3] - 2026-07-03
+
+### 新增
+
+- 为所有公共方法添加中文 docstring 注释
+
+### 修改
+
+- 将同步网络请求库 `requests` 替换为异步库 `aiohttp`，提升性能
+- 使用长生命周期 `ClientSession` 管理 HTTP 连接
+- 在 `terminate()` 方法中关闭 `ClientSession`，避免资源泄漏
+- 简化命令处理函数中的关键字解析逻辑，依赖框架自动处理命令前缀
+- 使用 ruff 格式化代码，符合 PEP8 规范
+- 更新 `metadata.yaml` 添加 `display_name`、`short_desc`、`astrbot_version` 字段
+- 更新 `requirements.txt` 替换依赖为 `aiohttp`
+- 更新 README.md 文档中的依赖说明
+
 ## [1.0.2] - 2026-07-02
 
 ### 新增
