@@ -590,6 +590,137 @@ def test_tool_output():
     )
 
 
+# ---------------------------------------------------------------- 统计口径
+def test_count_only():
+    """「国服有多少台」不应被配置的人数门槛/未满员/空服过滤静默缩小。"""
+
+    def build(plugin):
+        return [
+            plugin.normalize_server_data(
+                gm_item(name="[CN] 满员大服", numplayers=100, maxplayers=100, ip="1.1.1.1")
+            ),
+            plugin.normalize_server_data(
+                gm_item(name="[CN] 小服", numplayers=20, maxplayers=100, ip="3.3.3.3")
+            ),
+            plugin.normalize_server_data(
+                gm_item(name="[CN] 空服", numplayers=0, maxplayers=100, ip="4.4.4.4")
+            ),
+            plugin.normalize_server_data(
+                gm_item(name="[CN] 中文服", numplayers=70, maxplayers=100, ip="5.5.5.5")
+            ),
+            plugin.normalize_server_data(
+                gm_item(
+                    name="Overseas Chinese",
+                    country="",
+                    language="zh",
+                    numplayers=5,
+                    maxplayers=100,
+                    ip="6.6.6.6",
+                )
+            ),
+            plugin.normalize_server_data(
+                gm_item(
+                    name="[US] Big One",
+                    country="US",
+                    language="en",
+                    numplayers=90,
+                    maxplayers=100,
+                    ip="2.2.2.2",
+                )
+            ),
+        ]
+
+    plugin, _ = make_plugin(min_players=60, max_results=10)
+    servers = build(plugin)
+
+    # 普通查询仍沿用配置门槛(国内服 + 未满员 + 人数 >= 60)
+    _, total = plugin.select_servers(servers, None)
+    check("统计: 普通查询仍沿用配置门槛(满员服被排除)", total == 1, f"命中 {total}")
+
+    # 统计口径不受配置门槛影响, 只按显式条件统计
+    _, total = plugin.select_servers(servers, None, count_only=True)
+    check("统计: count_only 交出国内服总数", total == 4, f"命中 {total}")
+
+    _, total = plugin.select_servers(servers, None, count_only=True, min_players=60)
+    check("统计: count_only 下显式 min_players 仍生效", total == 2, f"命中 {total}")
+
+    _, total = plugin.select_servers(servers, None, count_only=True, countries=["CN"])
+    check("统计: count_only 支持 countries 严格筛选", total == 4, f"命中 {total}")
+
+    _, total = plugin.select_servers(servers, None, count_only=True, cn_only=False)
+    check("统计: count_only + cn_only=false 统计全部在线服", total == 6, f"命中 {total}")
+
+    _, total = plugin.select_servers(servers, None, count_only=True, only_joinable=True)
+    check("统计: count_only 下显式 only_joinable 仍生效", total == 3, f"命中 {total}")
+
+    # 口径说明
+    scope = plugin.describe_filters(
+        plugin.resolve_filters(broad_query=True, count_only=True)
+    )
+    check(
+        "统计: 统计口径说明如实写着不限人数/含0人服",
+        "不限人数" in scope and "含0人服" in scope and "含满员" in scope,
+        scope,
+    )
+    scope = plugin.describe_filters(plugin.resolve_filters(broad_query=True))
+    check(
+        "统计: 普通查询口径说明含配置门槛",
+        "≥60人" in scope and "未满员" in scope and "排除0人服" in scope,
+        scope,
+    )
+
+    # handle_query / LLM 工具输出
+    plugin2, _ = make_plugin(min_players=60, max_results=10)
+    plugin2.session = FakeSession(
+        [
+            {
+                "response": {
+                    "items": [
+                        gm_item(name="[CN] 满员大服", numplayers=100, maxplayers=100, ip="1.1.1.1"),
+                        gm_item(name="[CN] 小服", numplayers=20, maxplayers=100, ip="3.3.3.3"),
+                        gm_item(name="[CN] 空服", numplayers=0, maxplayers=100, ip="4.4.4.4"),
+                        gm_item(name="[CN] 中文服", numplayers=70, maxplayers=100, ip="5.5.5.5"),
+                        gm_item(name="[US] Big One", country="US", language="en", numplayers=90, maxplayers=100, ip="2.2.2.2"),
+                    ]
+                }
+            }
+        ]
+    )
+
+    text = asyncio.run(plugin2.query_squad_server_tool(None, count_only=True))
+    lines = text.split("\n")
+    check(
+        "统计: 工具只回报数量, 不列服务器",
+        len(lines) == 2 and lines[0].startswith("📊") and "命中 4 台" in lines[0],
+        text,
+    )
+    check(
+        "统计: 工具同时给出数据源在线总数",
+        "在线服务器共 5 台" in lines[1],
+        text,
+    )
+    check(
+        "统计: 统计口径下不受配置 limit 影响",
+        "🎮" not in text,
+        text,
+    )
+
+    text2 = asyncio.run(plugin2.query_squad_server_tool(None, count_only=True, cn_only=False))
+    check("统计: 工具可统计全部在线服", "命中 5 台" in text2, text2.split("\n")[0])
+
+    normal = asyncio.run(plugin2.query_squad_server_tool(None, limit=2))
+    check(
+        "统计: 普通查询首行标注筛选口径与国内服总数",
+        "筛选：" in normal and "国内服共 4 台" in normal,
+        normal.split("\n")[0],
+    )
+
+    empty = asyncio.run(
+        plugin2.query_squad_server_tool(None, count_only=True, keyword="不存在")
+    )
+    check("统计: 统计口径下无匹配返回 0 台", "命中 0 台" in empty, empty)
+
+
 def test_tool_docstring_contract():
     """AstrBot 只解析 docstring 的参数与类型，写错会静默丢参数。"""
     import inspect
@@ -636,6 +767,7 @@ def main():
         test_handle_query,
         test_tool_parameters,
         test_tool_output,
+        test_count_only,
         test_tool_docstring_contract,
     ):
         print(f"\n--- {test.__name__} ---")

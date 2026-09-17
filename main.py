@@ -407,6 +407,123 @@ class SquadServerStatusPlugin(Star):
             logger.error(f"标准化服务器数据失败: {e}")
             return None
 
+    def resolve_filters(
+        self,
+        broad_query,
+        min_players=None,
+        max_players=None,
+        only_joinable=None,
+        include_empty=None,
+        cn_only=None,
+        count_only=None,
+    ):
+        """解析本次查询实际生效的筛选口径
+
+        显式传参 > 插件配置。统计口径(count_only=True)下，宽泛查询不再套用配置的
+        人数门槛、满员过滤与空服过滤，只按显式条件统计真实总数。
+
+        Args:
+            broad_query (bool): 是否为无关键字查询
+            min_players (int, optional): 显式最低人数
+            max_players (int, optional): 显式最高人数
+            only_joinable (bool, optional): 显式是否只保留未满员
+            include_empty (bool, optional): 显式是否包含 0 人服务器
+            cn_only (bool, optional): 显式是否只看国内服
+            count_only (bool, optional): 是否为统计口径
+
+        Returns:
+            dict: min_players/max_players/only_joinable/include_empty/cn_only
+        """
+        configured_min = _as_int(self.config.get("min_players", 60)) or 0
+        configured_cn_only = bool(self.config.get("cn_only", True))
+        use_cn_only = configured_cn_only if cn_only is None else bool(cn_only)
+
+        if broad_query:
+            if count_only:
+                # 统计口径: 人数门槛/满员/空服默认值一律不生效, 只按显式条件统计
+                effective_min = min_players
+                keep_joinable = False if only_joinable is None else only_joinable
+                keep_empty = True if include_empty is None else include_empty
+            else:
+                effective_min = configured_min if min_players is None else min_players
+                keep_joinable = True if only_joinable is None else only_joinable
+                keep_empty = False if include_empty is None else include_empty
+        else:
+            effective_min = min_players
+            keep_joinable = bool(only_joinable)
+            keep_empty = True if include_empty is None else include_empty
+
+        return {
+            "min_players": effective_min,
+            "max_players": max_players,
+            "only_joinable": keep_joinable,
+            "include_empty": keep_empty,
+            "cn_only": use_cn_only,
+        }
+
+    def describe_filters(
+        self,
+        effective,
+        keyword=None,
+        countries=None,
+        languages=None,
+        map_keyword=None,
+    ):
+        """把生效的筛选口径拼成简短说明(用于结果首行，避免用户误读统计数字)
+
+        Args:
+            effective (dict): resolve_filters() 的返回值
+            keyword (str, optional): 名称关键字
+            countries (list|str, optional): 显式国别筛选
+            languages (list|str, optional): 显式语言筛选
+            map_keyword (str, optional): 地图关键字
+
+        Returns:
+            str: 形如"国内服 · ≥60人 · 未满员 · 排除0人服"的说明
+        """
+        country_filter = [item.upper() for item in _as_str_list(countries)]
+        language_filter = [item.lower() for item in _as_str_list(languages)]
+
+        parts = []
+        if keyword:
+            parts.append(f"名称含「{keyword}」")
+        if country_filter:
+            parts.append(f"地区 {'/'.join(country_filter)}")
+        elif effective.get("cn_only"):
+            parts.append("国内服")
+        if language_filter:
+            parts.append(f"语言 {'/'.join(language_filter)}")
+        if map_keyword:
+            parts.append(f"地图含「{map_keyword}」")
+
+        min_players = effective.get("min_players")
+        parts.append(f"≥{min_players}人" if min_players is not None else "不限人数")
+        max_players = effective.get("max_players")
+        if max_players is not None:
+            parts.append(f"≤{max_players}人")
+        parts.append("未满员" if effective.get("only_joinable") else "含满员")
+        parts.append("含0人服" if effective.get("include_empty") else "排除0人服")
+        return " · ".join(parts)
+
+    def count_cn_servers(self, servers):
+        """统计在线国内服总数(口径与 cn_only 一致: country 为 CN 或名称含中文)
+
+        Args:
+            servers (list): 标准化后的服务器列表
+
+        Returns:
+            int: 在线国内服数量
+        """
+        total = 0
+        for server in servers:
+            if not isinstance(server, dict):
+                continue
+            if str(server.get("status", "")).lower() != "online":
+                continue
+            if self._is_cn_server(server):
+                total += 1
+        return total
+
     def select_servers(
         self,
         servers,
@@ -422,11 +539,14 @@ class SquadServerStatusPlugin(Star):
         only_joinable=None,
         include_empty=None,
         cn_only=None,
+        count_only=None,
     ):
         """按条件筛选服务器
 
         显式传入的参数优先；未传入的参数在"宽泛查询"(无关键字)时回退到插件配置，
         在"关键字查询"时不额外施加人数/满员限制(与旧版行为保持一致)。
+        统计口径(count_only=True)下不套用配置的人数门槛/满员/空服默认值，
+        避免"国服有多少台"被默认筛选静默缩小。
 
         Args:
             servers (list): 服务器列表
@@ -442,6 +562,7 @@ class SquadServerStatusPlugin(Star):
             only_joinable (bool, optional): 只返回未满员的服务器
             include_empty (bool, optional): 是否包含 0 人服务器
             cn_only (bool, optional): 只看国内服(country 为 CN 或名称含中文)
+            count_only (bool, optional): 统计口径，为 True 时只按显式条件统计(不套用配置默认门槛)
 
         Returns:
             tuple[list, int]: (截断后的结果列表, 截断前的命中总数)
@@ -452,29 +573,20 @@ class SquadServerStatusPlugin(Star):
         map_keyword = str(map_keyword or "").strip()
         broad_query = not keyword
 
-        explicit_min = _as_int(min_players)
-        explicit_max = _as_int(max_players)
-        explicit_joinable = _as_bool(only_joinable)
-        explicit_empty = _as_bool(include_empty)
-        explicit_cn_only = _as_bool(cn_only)
-
-        configured_min = _as_int(self.config.get("min_players", 60)) or 0
-        configured_cn_only = bool(self.config.get("cn_only", True))
-
-        if broad_query:
-            effective_min = configured_min if explicit_min is None else explicit_min
-            keep_joinable = True if explicit_joinable is None else explicit_joinable
-            keep_empty = False if explicit_empty is None else explicit_empty
-            use_cn_only = (
-                configured_cn_only if explicit_cn_only is None else explicit_cn_only
-            )
-        else:
-            effective_min = explicit_min
-            keep_joinable = bool(explicit_joinable)
-            keep_empty = True if explicit_empty is None else explicit_empty
-            use_cn_only = (
-                configured_cn_only if explicit_cn_only is None else explicit_cn_only
-            )
+        effective = self.resolve_filters(
+            broad_query=broad_query,
+            min_players=_as_int(min_players),
+            max_players=_as_int(max_players),
+            only_joinable=_as_bool(only_joinable),
+            include_empty=_as_bool(include_empty),
+            cn_only=_as_bool(cn_only),
+            count_only=_as_bool(count_only),
+        )
+        effective_min = effective["min_players"]
+        explicit_max = effective["max_players"]
+        keep_joinable = effective["only_joinable"]
+        keep_empty = effective["include_empty"]
+        use_cn_only = effective["cn_only"]
 
         result_limit = _as_int(limit)
         if result_limit is None or result_limit <= 0:
@@ -689,11 +801,15 @@ class SquadServerStatusPlugin(Star):
         cn_only: bool | None = None,
         show_fields: list | None = None,
         compact: bool = False,
+        count_only: bool = False,
     ):
         """查询战术小队(Squad)服务器实时状态。
 
-        接口只返回在线服务器，可自由组合名称、国别、语言、地图、人数等条件，
-        并指定返回条数与排序方式；不带任何参数时按插件配置返回"未满员且人数达标"的国内服。
+        接口只返回在线服务器，可自由组合名称、国别、语言、地图、人数等条件，并指定返回条数与排序方式。
+
+        重要：不带任何参数时按插件配置返回"未满员且人数达标"的国内服，命中数会明显小于国内服总数。
+        用户只是想知道"有多少台/几台/总数"时，必须传 count_only=true——此时按显式条件统计真实总数，
+        不套用插件配置的人数门槛、未满员与排除空服默认值，并同时在结果首行标注本次筛选口径。
 
         Args:
             keyword (string): 服务器名称关键字(模糊匹配，不区分大小写)，留空表示不限名称
@@ -710,6 +826,7 @@ class SquadServerStatusPlugin(Star):
             cn_only (boolean): 是否只看国内服(country 为 CN 或名称含中文)；留空用插件配置
             show_fields (array[string]): 额外显示字段，可选 map/mode/version/ip/country/language
             compact (boolean): true 时每台服务器只输出一行(名称+人数)，适合一次查询较多服务器
+            count_only (boolean): 只统计数量时传 true(如"国服有多少台""总共几台")：不受插件配置的人数门槛/未满员/排除空服默认值影响，返回按显式条件过滤后的真实总数；默认 false
         """
         options = {
             "countries": _as_str_list(countries),
@@ -725,6 +842,7 @@ class SquadServerStatusPlugin(Star):
             "cn_only": cn_only,
             "show_fields": _as_str_list(show_fields),
             "compact": compact,
+            "count_only": count_only,
         }
         results = await self.handle_query(str(keyword).strip() or None, **options)
         return "\n".join(results)
@@ -745,6 +863,28 @@ class SquadServerStatusPlugin(Star):
         for result in results:
             yield event.plain_result(result)
 
+    def _build_header(self, total, returned, filter_scope, servers, effective, options):
+        """拼装结果首行的统计说明
+
+        除命中数外标注本次生效的筛选口径；国内服查询额外回报国内服总数，
+        避免把"未满员且人数达标"的命中数误读成"国内服一共就这么多台"。
+
+        Args:
+            total (int): 截断前的命中总数
+            returned (int): 实际返回的条数
+            filter_scope (str): describe_filters() 生成的口径说明
+            servers (list): 本次查询到的全部在线服务器
+            effective (dict): resolve_filters() 的返回值
+            options (dict): 本次查询选项(用于判断是否显式指定了国家)
+
+        Returns:
+            str: 结果首行文本
+        """
+        header = f"🔎 命中 {total} 台（筛选：{filter_scope}），返回 {returned} 台"
+        if effective.get("cn_only") and not _as_str_list(options.get("countries")):
+            header += f" | 国内服共 {self.count_cn_servers(servers)} 台"
+        return header
+
     async def handle_query(self, keyword=None, **options):
         """处理服务器查询请求
 
@@ -753,7 +893,8 @@ class SquadServerStatusPlugin(Star):
         Args:
             keyword (str, optional): 搜索关键字
             **options: 查询选项，透传给 select_servers(limit/countries/min_players 等)
-                以及 format_server_info(show_fields/compact)
+                以及 format_server_info(show_fields/compact)；
+                其中 count_only=True 时只回报数量(按显式条件统计, 不套用配置默认门槛)
 
         Returns:
             list[str]: 格式化后的服务器信息列表
@@ -792,17 +933,42 @@ class SquadServerStatusPlugin(Star):
             "only_joinable",
             "include_empty",
             "cn_only",
+            "count_only",
         )
         filter_options = {key: options[key] for key in filter_keys if key in options}
 
+        count_only = bool(_as_bool(options.get("count_only")))
+        effective = self.resolve_filters(
+            broad_query=not keyword,
+            min_players=_as_int(options.get("min_players")),
+            max_players=_as_int(options.get("max_players")),
+            only_joinable=_as_bool(options.get("only_joinable")),
+            include_empty=_as_bool(options.get("include_empty")),
+            cn_only=_as_bool(options.get("cn_only")),
+            count_only=count_only,
+        )
+        filter_scope = self.describe_filters(
+            effective,
+            keyword=keyword,
+            countries=options.get("countries"),
+            languages=options.get("languages"),
+            map_keyword=options.get("map_keyword"),
+        )
         selected, total = self.select_servers(servers, keyword, **filter_options)
+
+        if count_only:
+            # 统计口径: 只回报数量, 不列服务器, 且不受 default limit 影响
+            return [
+                f"📊 命中 {total} 台（筛选：{filter_scope}）",
+                f"📡 数据源在线服务器共 {len(servers)} 台",
+            ]
 
         if not selected:
             if keyword:
                 return [f"未找到匹配 '{keyword}' 的服务器"]
             return ["未找到符合条件的服务器"]
 
-        result_lines = [f"🔎 命中 {total} 台，返回 {len(selected)} 台"]
+        result_lines = [self._build_header(total, len(selected), filter_scope, servers, effective, options)]
         for i, server in enumerate(selected, 1):
             if not format_options["compact"]:
                 result_lines.append(f"--- [{i}] ---")

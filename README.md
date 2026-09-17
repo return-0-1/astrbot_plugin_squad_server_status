@@ -26,7 +26,7 @@
 /战术小队服务器 [服务器名称关键字]
 ```
 
-查询结果首行会给出命中统计（如 `🔎 命中 28 台，返回 5 台`），便于判断是否还有更多结果。
+查询结果首行会给出命中统计与**本次生效的筛选口径**（如 `🔎 命中 23 台（筛选：国内服 · ≥60人 · 未满员 · 排除0人服），返回 5 台 | 国内服共 141 台`），便于判断是否还有更多结果，也避免把被默认门槛过滤后的数字误读成“国内服一共就这么多台”。只想问数量时（如“国服有多少台”），AI 会传 `count_only=true`，直接回报真实总数。
 
 ### 使用示例
 
@@ -132,6 +132,7 @@ AI: 自动调用工具，返回包含"福星"的服务器
 | `only_joinable` | boolean | 只返回未满员（还能进）的服务器；留空时无关键字查询默认为 true |
 | `include_empty` | boolean | 是否包含 0 人的服务器；留空时带关键字查询默认为 true |
 | `cn_only` | boolean | 是否只看国内服；留空用插件配置 |
+| `count_only` | boolean | **只统计数量**（如“国服有多少台”）：不受插件配置的人数门槛、未满员与排除空服默认值影响，返回按显式条件过滤后的真实总数 |
 | `show_fields` | array[string] | 本次额外显示的字段：map/mode/version/ip/country/language |
 | `compact` | boolean | true 时每台服务器压成一行（名称+人数），适合一次查询较多服务器 |
 
@@ -145,10 +146,18 @@ AI: 自动调用工具，返回包含"福星"的服务器
 | “Mutaha 这图现在打的人多吗” | `map_keyword="Mutaha", sort_by="fill"` |
 | “中文服前 3 名” | `languages=["zh"], limit=3` |
 | “空服和满员服都列出来” | `include_empty=true, only_joinable=false, min_players=0` |
+| “国服一共有多少台” | `count_only=true` |
+| “CN 机房有多少台服” | `count_only=true, countries=["CN"]` |
 
 ## 查询逻辑
 
 参数优先级统一为 **显式传参 > 插件配置**。
+
+### 统计口径（`count_only=true`）
+- 用于回答“有多少台 / 几台 / 总数”这类纯计数问题
+- 只按显式传入的条件统计，**不套用**插件配置的 `min_players` 门槛、满员过滤与空服过滤
+- 输出形如 `📊 命中 141 台（筛选：国内服 · 不限人数 · 含满员 · 含0人服）` + `📡 数据源在线服务器共 587 台`
+- 不受 `limit` / `max_results` 影响（只回报数量，不列服务器）
 
 ### 不带参数查询（宽泛查询）
 - 仅返回 `cn_only` 筛中的服务器（除非显式传 `countries` 或 `cn_only=false`）
@@ -156,6 +165,7 @@ AI: 自动调用工具，返回包含"福星"的服务器
 - 排除满员服务器（除非 `only_joinable=false`）
 - 排除 0 人服务器（除非 `include_empty=true`）
 - 按 `sort_by` / `order` 排序（默认人数降序），最多返回 `limit` 条（默认 `max_results`）
+- 输出首行同时回报**国内服总数**，便于与命中数对比（如命中 23 台 / 国内服共 141 台）
 
 ### 带参数查询（关键词搜索）
 - 根据关键字模糊匹配服务器名称（不区分大小写）
@@ -226,14 +236,14 @@ astrbot_plugin_squad_server_status/
 ├── CHANGELOG.md           # 更新日志
 ├── LICENSE                # MIT 许可证
 ├── _astrbot_stub.py       # 测试用的 AstrBot 依赖替身
-├── test_plugin.py         # 离线单元测试（64 项断言）
+├── test_plugin.py         # 离线单元测试（78 项断言）
 └── test_real_api.py       # 联网集成测试（20 项断言）
 ```
 
 ## 测试
 
 ```bash
-# 离线单元测试：字段适配、筛选、分页、缓存、容错、分段输出、LLM 工具参数与 docstring 契约
+# 离线单元测试：字段适配、筛选、分页、缓存、容错、分段输出、统计口径、LLM 工具参数与 docstring 契约
 python test_plugin.py
 
 # 联网集成测试：真实调用 API 并驱动插件抓取/查询链路
@@ -248,6 +258,7 @@ python test_real_api.py
 - 60 秒缓存命中
 - 无参数查询、关键字查询、无匹配提示
 - `cn_only` 开关下的国内外服务器表现
+- 统计口径 `count_only`（国内服总数 / 全部在线服总数）与结果首行口径说明
 
 ## 注意事项
 
