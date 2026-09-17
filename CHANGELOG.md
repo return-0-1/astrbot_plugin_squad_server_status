@@ -1,5 +1,29 @@
 # 更新日志
 
+## [1.1.0] - 2026-09-17
+
+### 修改
+
+- **数据源替换为 GAMEMONITORING 公开 API**（`https://api.gamemonitoring.ro`，镜像 `api.gamemonitoring.net`），移除原 SquadCalc 与 BattleMetrics 数据源，不再保留备用源
+- 新增数据适配层：将 GAMEMONITORING 的 `numplayers` / `maxplayers` / `status`(布尔) 等字段映射为插件内部统一格式（`players` / `max_players` / `status` 字符串）
+- 抓取改为按 `game=393380`(Squad 的 Steam AppID) + `status=1` + 按人数降序分页拉取（每页 500 条，最多 4 页）
+- `cn_only` 判定改为以 API 的 `country` 字段为准（`country=CN`），名称含中文的境外服务器同样纳入，不再仅靠中文字符猜测
+- 服务器覆盖量由 100 余台提升至 500 余台在线服务器
+- 使用 `asyncio.get_running_loop()` 替代已废弃的 `asyncio.get_event_loop()`
+
+### 新增
+
+- 新增 `_astrbot_stub.py`：AstrBot 依赖测试替身，使测试脚本可直接导入并实例化插件本体
+- `test_plugin.py` 重写为离线单元测试（41 项断言，含假 HTTP 会话的分页/缓存/容错验证）
+- `test_real_api.py` 重写为联网集成测试（20 项断言，直接驱动插件本体的抓取与查询链路）
+- 配置文件 schema 补充数据源能力说明（Ping、模式、排队人数等字段的可用性）
+
+### 已知限制
+
+- GAMEMONITORING 不提供延迟(Ping)数据，服务器延迟统一显示为“未知”，`ping_threshold` 选项暂不生效
+- 列表接口不返回 `gamemode`，仅单服详情接口提供，插件不额外发起逐服务器请求
+- 不提供排队人数，`queue` 恒为 0
+
 ## [1.0.3] - 2026-07-03
 
 ### 新增

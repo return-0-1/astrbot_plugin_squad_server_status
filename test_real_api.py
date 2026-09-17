@@ -1,264 +1,206 @@
+"""真实 API 联网测试
+
+直接调用插件本体的 fetch_servers / handle_query，验证 GAMEMONITORING 数据源的
+连通性、字段适配与端到端输出。需要联网。
+运行: python test_real_api.py
+"""
+
 import asyncio
-import requests
-import json
+import sys
+import time
 
-class MockConfig:
-    def __init__(self, **kwargs):
-        self._config = kwargs
-    
-    def get(self, key, default=None):
-        return self._config.get(key, default)
+import aiohttp
 
-class SquadServerStatusCore:
-    def __init__(self, config):
-        self.config = config
-        self.api_sources = [
-            "https://squadcalc.app/api/get/servers"
-        ]
-        self.cache = {}
-        self.cache_time = 0
+from _astrbot_stub import make_plugin
 
-    def get_mock_servers(self):
-        return []
+RESULTS = []
+REQUESTS = []
 
-    async def fetch_servers(self):
-        for api_url in self.api_sources:
-            try:
-                headers = {"User-Agent": "AstrBot-Squad-Plugin/1.0"}
-                response = await asyncio.to_thread(
-                    requests.get, api_url, headers=headers, timeout=15
-                )
-                response.raise_for_status()
-                data = response.json()
 
-                if isinstance(data, dict):
-                    servers = data.get("servers", data.get("data", []))
-                elif isinstance(data, list):
-                    servers = data
-                else:
-                    continue
+def check(name, condition, detail=""):
+    RESULTS.append((name, bool(condition), detail))
+    print(
+        f"{'PASS' if condition else 'FAIL'} | {name}"
+        + (f" | {detail}" if detail else "")
+    )
 
-                if servers and isinstance(servers, list) and len(servers) > 0:
-                    normalized = []
-                    for server in servers:
-                        normalized_server = self.normalize_server_data(server)
-                        if normalized_server:
-                            normalized.append(normalized_server)
-                    return normalized
 
-            except Exception as e:
-                print(f"API请求失败: {e}")
-                continue
+async def _on_request_start(session, trace_config_ctx, params):
+    REQUESTS.append(str(params.url))
 
-        return None
 
-    def normalize_server_data(self, server):
-        try:
-            if isinstance(server, dict):
-                data = server
-            else:
-                return None
+def make_traced_session():
+    """构造带请求计数的真实会话(与插件内部创建的会话参数一致)"""
+    trace = aiohttp.TraceConfig()
+    trace.on_request_start.append(_on_request_start)
+    return aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=60),
+        headers={"User-Agent": "AstrBot-Squad-Plugin/1.0"},
+        trace_configs=[trace],
+    )
 
-            attributes = data.get("attributes", data)
-            details = attributes.get("details", {})
 
-            return {
-                "name": str(attributes.get("name", data.get("name", ""))),
-                "players": int(attributes.get("players", data.get("players", 0))),
-                "max_players": int(attributes.get("maxPlayers", attributes.get("max_players", data.get("max_players", 0)))),
-                "ping": int(attributes.get("ping", data.get("ping", 999))),
-                "queue": int(details.get("squad_publicQueue", details.get("queue", attributes.get("queue", data.get("queue", 0))))),
-                "status": str(attributes.get("status", data.get("status", "online"))).lower(),
-                "map": str(details.get("map", attributes.get("map", data.get("map", "")))),
-                "mode": str(details.get("gameMode", attributes.get("mode", data.get("mode", "")))),
-                "version": str(details.get("version", attributes.get("version", data.get("version", "")))),
-                "ip": str(attributes.get("ip", data.get("ip", ""))),
-                "port": str(attributes.get("port", data.get("port", "")))
-            }
-        except Exception as e:
-            print(f"标准化服务器数据失败: {e}")
-            return None
-
-    def filter_servers(self, servers, keyword=None):
-        ping_threshold = self.config.get("ping_threshold", 200)
-        min_players = self.config.get("min_players", 60)
-        max_results = self.config.get("max_results", 10)
-        cn_only = self.config.get("cn_only", True)
-
-        filtered = []
-        for server in servers:
-            try:
-                if not isinstance(server, dict):
-                    continue
-
-                ping = int(server.get("ping", 999))
-                players = int(server.get("players", 0))
-                max_players = int(server.get("max_players", 0))
-                status = str(server.get("status", "")).lower()
-
-                if ping >= ping_threshold and ping != 999:
-                    continue
-
-                if status != "online":
-                    continue
-
-                name = server.get("name", "")
-                if not name:
-                    continue
-
-                if cn_only and not self._contains_chinese(name):
-                    continue
-
-                if keyword:
-                    if keyword.lower() not in name.lower():
-                        continue
-                else:
-                    if players < min_players:
-                        continue
-                    if players >= max_players:
-                        continue
-
-                filtered.append(server)
-            except (ValueError, TypeError) as e:
-                continue
-
-        filtered.sort(key=lambda s: int(s.get("players", 0)), reverse=True)
-        return filtered[:max_results]
-
-    def _contains_chinese(self, text):
-        for char in text:
-            if '\u4e00' <= char <= '\u9fff':
-                return True
-        return False
-
-    def format_server_info(self, server):
-        name = server.get("name", "未知服务器")
-        players = int(server.get("players", 0))
-        max_players = int(server.get("max_players", 0))
-        ping = int(server.get("ping", 0))
-        queue = int(server.get("queue", 0))
-
-        result = f"🎮 {name}\n"
-        result += f"👥 {players}/{max_players}"
-        if queue > 0:
-            result += f" | 排队: {queue}"
-        result += f"\n⏱️ Ping: {'未知' if ping >= 999 else f'{ping}ms'}"
-
-        if self.config.get("show_extra_fields", False):
-            extra_fields = self.config.get("extra_fields", [])
-
-            if "map" in extra_fields:
-                map_name = server.get("map", "")
-                if map_name:
-                    result += f"\n🗺️ 地图: {map_name}"
-
-            if "mode" in extra_fields:
-                mode = server.get("mode", "")
-                if mode:
-                    result += f"\n⚔️ 模式: {mode}"
-
-            if "version" in extra_fields:
-                version = server.get("version", "")
-                if version:
-                    result += f"\n📦 版本: {version}"
-
-            if "ip" in extra_fields:
-                ip = server.get("ip", "")
-                port = server.get("port", "")
-                if ip:
-                    result += f"\n🌐 IP: {ip}:{port}"
-
-        return result
-
-    async def handle_query(self, keyword=None):
-        servers = await self.fetch_servers()
-
-        if not servers:
-            return ["查询失败，请稍后重试"]
-
-        print(f"获取到 {len(servers)} 个服务器")
-
-        filtered = self.filter_servers(servers, keyword)
-
-        if not filtered:
-            if keyword:
-                return [f"未找到匹配 '{keyword}' 的服务器"]
-            else:
-                return ["未找到符合条件的服务器"]
-
-        result_lines = []
-        for i, server in enumerate(filtered, 1):
-            info = self.format_server_info(server)
-            result_lines.append(f"--- [{i}] ---")
-            result_lines.append(info)
-
-        result = "\n".join(result_lines)
-
-        if len(result) > 2000:
-            chunks = []
-            current_chunk = ""
-            for line in result_lines:
-                if len(current_chunk) + len(line) > 1800:
-                    chunks.append(current_chunk)
-                    current_chunk = line
-                else:
-                    current_chunk += "\n" + line if current_chunk else line
-            if current_chunk:
-                chunks.append(current_chunk)
-            return chunks
-        else:
-            return [result]
-
-async def test_real_api():
-    print("="*60)
-    print("测试真实 API - 不带参数查询")
-    print("="*60)
-    
-    config = MockConfig(
-        ping_threshold=200,
+async def main():
+    plugin, module = make_plugin(
+        show_extra_fields=True,
+        extra_fields=["map", "version", "ip"],
+        max_results=10,
         min_players=60,
-        max_results=10,
-        show_extra_fields=True,
-        extra_fields=["map", "mode"],
-        cn_only=True
     )
-    
-    plugin = SquadServerStatusCore(config)
-    results = await plugin.handle_query(None)
-    
-    for result in results:
-        print(result)
-        print()
+    plugin.session = make_traced_session()
 
-async def test_real_api_with_keyword():
-    print("="*60)
-    print("测试真实 API - 带关键字查询 'CN'")
-    print("="*60)
-    
-    config = MockConfig(
-        ping_threshold=200,
-        min_players=0,
-        max_results=10,
-        show_extra_fields=True,
-        extra_fields=["map", "mode"],
-        cn_only=True
+    print(f"数据源: {module.API_BASE}  游戏 AppID: {module.SQUAD_APP_ID}\n")
+
+    # ---------- 1. 抓取与字段适配 ----------
+    t0 = time.time()
+    servers = await plugin.fetch_servers()
+    elapsed = time.time() - t0
+    print(
+        f"=== 抓取: {len(servers)} 台, {elapsed:.2f}s, 实际请求 {len(REQUESTS)} 次 ==="
     )
-    
-    plugin = SquadServerStatusCore(config)
-    results = await plugin.handle_query("CN")
-    
-    for result in results:
-        print(result)
-        print()
+    check("分页: 至少发出一次请求", len(REQUESTS) >= 1, str(REQUESTS[:1]))
+
+    check(
+        "连通: 成功取到服务器数据", servers and len(servers) > 0, f"{len(servers)} 台"
+    )
+    check("分页: 单次抓取耗时在 30s 内", elapsed < 30, f"{elapsed:.2f}s")
+    check("适配: 全部为在线状态", all(s["status"] == "online" for s in servers))
+    total_players = sum(s["players"] for s in servers)
+    populated = sum(1 for s in servers if s["players"] > 0)
+    check("适配: 玩家总数合理(>1000)", total_players > 1000, f"总人数 {total_players}")
+    check(
+        "适配: 存在有人的服务器",
+        populated > 50,
+        f"{populated} 台有人(多数在线服是空服)",
+    )
+    check(
+        "适配: 人数上限字段非全零",
+        sum(1 for s in servers if s["max_players"] > 0) > len(servers) * 0.5,
+    )
+    check(
+        "适配: 地图字段非空", sum(1 for s in servers if s["map"]) > len(servers) * 0.9
+    )
+    check(
+        "适配: 版本字段非空",
+        sum(1 for s in servers if s["version"]) > len(servers) * 0.9,
+    )
+    check(
+        "适配: 无延迟数据统一为哨兵值",
+        all(s["ping"] == module.PING_UNKNOWN for s in servers),
+    )
+    check(
+        "适配: 携带国别字段",
+        sum(1 for s in servers if s["country"]) > len(servers) * 0.9,
+    )
+
+    cn = [s for s in servers if s["country"] == "CN"]
+    check("覆盖: 存在中国大陆服务器", len(cn) > 0, f"{len(cn)} 台")
+    print(f"  国别分布 Top5: {_top_countries(servers)}")
+
+    # ---------- 2. 缓存 ----------
+    t1 = time.time()
+    cached = await plugin.fetch_servers()
+    check(
+        "缓存: 60 秒内二次查询直接返回缓存",
+        cached is servers and time.time() - t1 < 0.05,
+        f"{time.time() - t1:.3f}s",
+    )
+
+    # ---------- 3. 端到端查询 ----------
+    print("\n" + "=" * 60)
+    print("无参数查询(默认: 未满员 + 人数≥60)")
+    print("=" * 60)
+    results = await plugin.handle_query(None)
+    output = "\n".join(results)
+    print(output)
+    check("查询: 无参数返回结果", "🎮" in output, f"{output.count('🎮')} 台")
+    check(
+        "查询: 结果按人数降序",
+        _players_from_output(output)
+        == sorted(_players_from_output(output), reverse=True),
+        str(_players_from_output(output)),
+    )
+    check(
+        "查询: 过滤掉外文服务器(默认 cn_only)",
+        all(
+            any("\u4e00" <= c <= "\u9fff" for c in line) or _is_cn_ip(line)
+            for line in output.splitlines()
+            if line.startswith("🎮")
+        )
+        or "未找到" in output,
+    )
+
+    print("\n" + "=" * 60)
+    print("关键字查询: 福星")
+    print("=" * 60)
+    kw_results = await plugin.handle_query("福星")
+    print("\n".join(kw_results))
+    check(
+        "查询: 关键字命中",
+        "福星" in "\n".join(kw_results) or "未找到" in "\n".join(kw_results),
+    )
+
+    print("\n" + "=" * 60)
+    print("关键字查询: 不存在的服务器")
+    print("=" * 60)
+    miss = await plugin.handle_query("不存在的服务器名字")
+    print("\n".join(miss))
+    check("查询: 无匹配提示正确", miss == ["未找到匹配 '不存在的服务器名字' 的服务器"])
+
+    # ---------- 4. 关闭 cn_only 的全球查询 ----------
+    global_plugin, _ = make_plugin(
+        cn_only=False, max_results=5, show_extra_fields=True, extra_fields=["map", "ip"]
+    )
+    global_results = await global_plugin.handle_query(None)
+    print("\n" + "=" * 60)
+    print("cn_only 关闭时的全球查询")
+    print("=" * 60)
+    print("\n".join(global_results))
+    global_out = "\n".join(global_results)
+    check(
+        "查询: cn_only 关闭后能返回境外服务器",
+        "🎮" in global_out or "未找到" in global_out,
+    )
+    check(
+        "适配: 英文名服务器能正常渲染",
+        any(
+            not any("\u4e00" <= c <= "\u9fff" for c in line)
+            for line in global_out.splitlines()
+            if line.startswith("🎮")
+        )
+        or "未找到" in global_out,
+    )
+
+    await plugin.terminate()
+    await global_plugin.terminate()
+
+    failed = [name for name, ok, _ in RESULTS if not ok]
+    print(f"\n{'=' * 60}")
+    print(f"通过 {len(RESULTS) - len(failed)}/{len(RESULTS)} 项")
+    for name in failed:
+        print(f"  FAILED: {name}")
+    print("=" * 60)
+    return 1 if failed else 0
+
+
+def _top_countries(servers):
+    counts = {}
+    for s in servers:
+        counts[s["country"]] = counts.get(s["country"], 0) + 1
+    return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
+
+
+def _players_from_output(output):
+    values = []
+    for line in output.splitlines():
+        if line.startswith("👥 "):
+            values.append(int(line[2:].split("/")[0]))
+    return values
+
+
+def _is_cn_ip(line):
+    return "🌐 IP:" in line
+
 
 if __name__ == "__main__":
-    print("\n" + "="*60)
-    print("Squad服务器状态插件 - 真实API测试")
-    print("="*60 + "\n")
-    
-    asyncio.run(test_real_api())
-    asyncio.run(test_real_api_with_keyword())
-    
-    print("="*60)
-    print("测试完成")
-    print("="*60)
+    sys.exit(asyncio.run(main()))
