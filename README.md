@@ -10,7 +10,7 @@
 - ⚡ 自动过滤满员服务器，只展示能进得去的活跃服
 - 📊 按人数排序显示
 - 🎨 支持自定义显示字段
-- 🤖 **AI 自动调用**：注册为 LLM Tool，AI 可根据对话上下文自主调用
+- 🤖 **AI 自由调用**：注册为 LLM Tool，AI 可自主组合国别/语言/地图/人数/排序/条数等 14 个参数查询
 
 ## 命令说明
 
@@ -25,6 +25,8 @@
 ```
 /战术小队服务器 [服务器名称关键字]
 ```
+
+查询结果首行会给出命中统计（如 `🔎 命中 28 台，返回 5 台`），便于判断是否还有更多结果。
 
 ### 使用示例
 
@@ -55,6 +57,8 @@
 | `mode` | 游戏模式（数据源列表接口不提供，留空不显示） | ❌ |
 | `version` | 游戏版本号 | ✅ |
 | `ip` | 服务器IP地址和端口 | ✅ |
+| `country` | 服务器所在地区（ISO 国别码，如 CN / RU） | ✅ |
+| `language` | 服务器语言（如 zh / en / ru） | ✅ |
 | `queue` | 排队人数（数据源不提供，恒为 0 故不显示） | ❌ |
 
 ## 配置说明
@@ -65,9 +69,9 @@
 |--------|--------|------|
 | `ping_threshold` | 200 | Ping 阈值（ms）。当前数据源不提供延迟数据，此选项暂不生效 |
 | `min_players` | 60 | 无参数查询时的最低人数门槛 |
-| `max_results` | 10 | 单次查询最大返回条数 |
+| `max_results` | 10 | 默认返回条数；AI 调用工具时可用 `limit` 参数按次覆盖（上限 100） |
 | `show_extra_fields` | false | 是否显示额外字段 |
-| `extra_fields` | ["map", "mode"] | 额外显示的字段列表 |
+| `extra_fields` | ["map", "mode"] | 额外显示的字段列表（可选 map/mode/version/ip/country/language/queue） |
 | `debug_mode` | false | 调试模式，启用后使用模拟数据 |
 | `fallback_to_mock` | true | API 不可用时自动使用模拟数据（模拟数据非真实状态，生产环境建议关闭） |
 | `cn_only` | true | 仅显示国内服务器：`country` 为 CN，或名称包含中文字符 |
@@ -108,23 +112,60 @@ AI: 自动调用工具，返回包含"福星"的服务器
 ### Tool 配置
 
 - **工具名称**: `query_squad_server`
-- **描述**: 查询战术小队(Squad)服务器状态，可按关键词搜索或返回所有活跃服务器
-- **参数**: `keyword`（可选）- 服务器名称关键字
+- **描述**: 查询战术小队(Squad)服务器实时状态，可自由组合筛选条件并指定返回条数与排序
+
+### Tool 参数
+
+所有参数都是可选的；不传时按插件配置返回“未满员且人数达标”的国内服。
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `keyword` | string | 服务器名称关键字（模糊匹配，不区分大小写） |
+| `countries` | array[string] | 国别代码列表，如 `["CN","US"]`；**传入后按国家严格筛选，覆盖 `cn_only`** |
+| `languages` | array[string] | 语言代码列表，如 `["zh"]` 查中文服、`["en"]` 查英文服 |
+| `map_keyword` | string | 地图名关键字，如 `"Mutaha"` |
+| `min_players` | number | 最低当前人数 |
+| `max_players` | number | 最高当前人数 |
+| `limit` | number | **返回条数上限（1-100）**，留空用配置的 `max_results` |
+| `sort_by` | string | 排序字段：`players`(默认) / `name` / `map` / `fill`(满员度) |
+| `order` | string | 排序方向：`desc`(默认) / `asc` |
+| `only_joinable` | boolean | 只返回未满员（还能进）的服务器；留空时无关键字查询默认为 true |
+| `include_empty` | boolean | 是否包含 0 人的服务器；留空时带关键字查询默认为 true |
+| `cn_only` | boolean | 是否只看国内服；留空用插件配置 |
+| `show_fields` | array[string] | 本次额外显示的字段：map/mode/version/ip/country/language |
+| `compact` | boolean | true 时每台服务器压成一行（名称+人数），适合一次查询较多服务器 |
+
+### AI 调用示例
+
+| 用户说法 | AI 可能传入的参数 |
+|----------|------------------|
+| “有哪些国服还没满” | `countries=["CN"], only_joinable=true` |
+| “美服有人吗” | `countries=["US"], min_players=1` |
+| “给我 30 台服的名单” | `limit=30, compact=true` |
+| “Mutaha 这图现在打的人多吗” | `map_keyword="Mutaha", sort_by="fill"` |
+| “中文服前 3 名” | `languages=["zh"], limit=3` |
+| “空服和满员服都列出来” | `include_empty=true, only_joinable=false, min_players=0` |
 
 ## 查询逻辑
+
+参数优先级统一为 **显式传参 > 插件配置**。
+
+### 不带参数查询（宽泛查询）
+- 仅返回 `cn_only` 筛中的服务器（除非显式传 `countries` 或 `cn_only=false`）
+- 仅返回人数 ≥ `min_players` 的服务器（除非显式传 `min_players`）
+- 排除满员服务器（除非 `only_joinable=false`）
+- 排除 0 人服务器（除非 `include_empty=true`）
+- 按 `sort_by` / `order` 排序（默认人数降序），最多返回 `limit` 条（默认 `max_results`）
 
 ### 带参数查询（关键词搜索）
 - 根据关键字模糊匹配服务器名称（不区分大小写）
 - **仍受 `cn_only` 国别筛选约束**
-- 返回结果按人数从高到低排序
-- 最多返回 `max_results` 条
+- 不额外施加人数门槛与满员过滤（保持旧行为），但显式传入的 `min_players` / `only_joinable` 等参数同样生效
+- 最多返回 `limit` 条（默认 `max_results`）
 
-### 不带参数查询
-- 返回所有未满人的服务器（当前人数 < 人数上限）
-- 仅返回人数 ≥ `min_players` 的服务器
-- 仅返回 `cn_only` 筛中的服务器
-- 返回结果按人数从高到低排序
-- 最多返回 `max_results` 条
+### 参数兜底
+- `limit` 硬上限 100，超出会被截断到 100
+- 未知的 `sort_by` 回退 `players`，非数字的 `limit` 回退配置值，非法参数不会报错
 
 ## 数据来源
 
@@ -170,7 +211,7 @@ AI: 自动调用工具，返回包含"福星"的服务器
 
 ## 依赖说明
 
-- Python 3.8+
+- Python 3.10+（插件运行于 AstrBot v4.16+，AstrBot 自身要求 Python 3.12）
 - aiohttp 库（用于异步 API 请求）
 
 ## 文件结构
@@ -185,14 +226,14 @@ astrbot_plugin_squad_server_status/
 ├── CHANGELOG.md           # 更新日志
 ├── LICENSE                # MIT 许可证
 ├── _astrbot_stub.py       # 测试用的 AstrBot 依赖替身
-├── test_plugin.py         # 离线单元测试（41 项断言）
+├── test_plugin.py         # 离线单元测试（64 项断言）
 └── test_real_api.py       # 联网集成测试（20 项断言）
 ```
 
 ## 测试
 
 ```bash
-# 离线单元测试：字段适配、筛选、分页、缓存、容错、分段输出
+# 离线单元测试：字段适配、筛选、分页、缓存、容错、分段输出、LLM 工具参数与 docstring 契约
 python test_plugin.py
 
 # 联网集成测试：真实调用 API 并驱动插件抓取/查询链路
@@ -223,6 +264,13 @@ python test_real_api.py
 MIT License
 
 ## 更新日志
+
+### v1.2.0
+- LLM Tool 参数全面开放：`query_squad_server` 由单一 `keyword` 扩展为 14 个参数
+  （国别/语言/地图/人数区间/条数/排序/是否排除满员/是否含空服/显示字段/紧凑模式）
+- 查询结果新增“命中 N 台，返回 M 台”统计行
+- 显示字段新增 `country` / `language`
+- 离线测试扩充至 64 项，新增 docstring 参数契约测试
 
 ### v1.1.0
 - 数据源替换为 GAMEMONITORING 公开 API，移除 SquadCalc 与 BattleMetrics

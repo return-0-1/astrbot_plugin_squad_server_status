@@ -14,7 +14,7 @@
     "max_results": {
         "description": "最大返回条数",
         "type": "int",
-        "hint": "单次查询最多返回的服务器数量",
+        "hint": "单次查询最多返回的服务器数量。AI 调用工具时可用 limit 参数按次覆盖(上限 100)",
         "default": 10
     },
     "show_extra_fields": {
@@ -26,8 +26,8 @@
     "extra_fields": {
         "description": "额外显示字段",
         "type": "list",
-        "hint": "选择要额外显示的字段：map(地图)、mode(模式，数据源列表接口不提供，暂不可用)、version(版本)、queue(排队人数，数据源不提供)、ip(服务器IP)",
-        "options": ["map", "mode", "version", "queue", "ip"],
+        "hint": "选择要额外显示的字段：map(地图)、mode(模式，数据源列表接口不提供，暂不可用)、version(版本)、queue(排队人数，数据源不提供)、ip(服务器IP)、country(地区)、language(语言)。AI 调用工具时可用 show_fields 参数按次覆盖",
+        "options": ["map", "mode", "version", "queue", "ip", "country", "language"],
         "default": ["map", "mode"]
     },
     "debug_mode": {

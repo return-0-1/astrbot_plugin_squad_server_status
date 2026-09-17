@@ -1,5 +1,33 @@
 # 更新日志
 
+## [1.2.0] - 2026-09-17
+
+### 新增
+
+- **LLM Tool 参数全面开放**：`query_squad_server` 由单一 `keyword` 扩展为 14 个参数，
+  AI 可按需组合查询条件，不再受插件配置写死的筛选规则限制
+  - 筛选：`countries`(国别，覆盖 `cn_only`)、`languages`(语言)、`map_keyword`(地图)、`min_players` / `max_players`(人数区间)
+  - 条数与排序：`limit`(返回条数，1-100，覆盖 `max_results`)、`sort_by`(players/name/map/fill)、`order`(asc/desc)
+  - 放宽限制：`only_joinable`(是否排除满员服)、`include_empty`(是否包含 0 人服务器)、`cn_only`(是否只看国内服)
+  - 显示：`show_fields`(本次额外显示 map/mode/version/ip/country/language)、`compact`(每台服务器压成一行)
+- 查询入口新增命中统计：输出首行显示“命中 N 台，返回 M 台”，便于 AI 与用户判断是否还有更多结果
+- `select_servers()` 方法：返回 `(结果列表, 截断前命中总数)`，`filter_servers()` 保留为兼容包装
+- 显示字段新增 `country`(🌍 地区) 与 `language`(🗣️ 语言)，配置文件 `extra_fields` 同步新增这两个可选项
+
+### 修改
+
+- 参数优先级统一为“显式传参 > 插件配置”：无关键字查询时沿用配置的人数门槛与满员过滤，
+  带关键字查询时仍不额外施加人数门槛（保持旧行为），但显式传入的 `min_players` 等参数在两种模式下都生效
+- `limit` 设硬上限 100，防止一次拉取过多结果撑爆上下文
+- 非法参数（未知排序字段、非数字 limit 等）自动回退默认值，不再抛异常
+- `max_results` 语义明确为“默认返回条数”，可被工具参数 `limit` 按次覆盖
+
+### 测试
+
+- `test_plugin.py` 由 41 项断言扩充至 64 项：新增 LLM 工具参数、工具输出格式、docstring 参数契约三类测试
+- 新增 docstring 契约测试：校验每个参数在 docstring 中标注了类型、类型均属 AstrBot 支持列表，
+  防止参数被框架静默丢弃
+
 ## [1.1.0] - 2026-09-17
 
 ### 修改

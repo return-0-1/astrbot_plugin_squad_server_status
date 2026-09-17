@@ -1,4 +1,5 @@
 import asyncio
+import re
 
 import aiohttp
 
@@ -19,6 +20,76 @@ PING_UNKNOWN = 999
 CACHE_TTL = 60
 # 单次 HTTP 请求超时(秒)
 REQUEST_TIMEOUT = 30
+# 单次查询允许的最大返回条数(防止把 LLM 上下文撑爆)
+MAX_RESULT_LIMIT = 100
+# 支持的排序字段: 人数 / 名称 / 地图 / 满员度
+SORT_FIELDS = ("players", "name", "map", "fill")
+# 可选的额外显示字段
+EXTRA_FIELD_CHOICES = ("map", "mode", "version", "ip", "country", "language", "queue")
+
+
+def _as_int(value):
+    """把工具入参转换为整数
+
+    LLM 可能把数字参数传成字符串，统一在这里兜底。
+
+    Args:
+        value: 原始入参
+
+    Returns:
+        int|None: 转换成功返回整数，无法转换返回 None
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_bool(value):
+    """把工具入参转换为布尔值
+
+    Args:
+        value: 原始入参
+
+    Returns:
+        bool|None: 无法识别时返回 None，由调用方回退到配置或默认行为
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("true", "1", "yes", "y", "on", "是"):
+        return True
+    if text in ("false", "0", "no", "n", "off", "否"):
+        return False
+    return None
+
+
+def _as_str_list(value):
+    """把工具入参规范化为字符串列表
+
+    兼容 ["CN","US"]、单字符串 "CN"、逗号或顿号分隔的 "CN, US" 等写法。
+
+    Args:
+        value: 原始入参
+
+    Returns:
+        list[str]: 去除空白后的字符串列表
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = re.split(r"[,\s;、]+", value)
+    elif isinstance(value, (list, tuple, set)):
+        items = [str(item) for item in value]
+    else:
+        items = [str(value)]
+    return [item.strip() for item in items if str(item).strip()]
 
 
 class SquadServerStatusPlugin(Star):
@@ -336,34 +407,89 @@ class SquadServerStatusPlugin(Star):
             logger.error(f"标准化服务器数据失败: {e}")
             return None
 
-    def filter_servers(self, servers, keyword=None):
-        """筛选服务器列表
+    def select_servers(
+        self,
+        servers,
+        keyword=None,
+        countries=None,
+        languages=None,
+        map_keyword=None,
+        min_players=None,
+        max_players=None,
+        limit=None,
+        sort_by=None,
+        order=None,
+        only_joinable=None,
+        include_empty=None,
+        cn_only=None,
+    ):
+        """按条件筛选服务器
 
-        根据配置的筛选条件过滤服务器，支持关键字搜索。
+        显式传入的参数优先；未传入的参数在"宽泛查询"(无关键字)时回退到插件配置，
+        在"关键字查询"时不额外施加人数/满员限制(与旧版行为保持一致)。
 
         Args:
             servers (list): 服务器列表
-            keyword (str, optional): 搜索关键字
+            keyword (str, optional): 名称关键字(模糊匹配，不区分大小写)
+            countries (list|str, optional): 国别代码，传入后按 country 严格筛选并覆盖 cn_only
+            languages (list|str, optional): 语言代码(如 zh / en)
+            map_keyword (str, optional): 地图名关键字
+            min_players (int, optional): 最低当前人数
+            max_players (int, optional): 最高当前人数
+            limit (int, optional): 返回条数上限，不传则用配置的 max_results
+            sort_by (str, optional): players/name/map/fill，默认 players
+            order (str, optional): asc 为升序，其它值按降序
+            only_joinable (bool, optional): 只返回未满员的服务器
+            include_empty (bool, optional): 是否包含 0 人服务器
+            cn_only (bool, optional): 只看国内服(country 为 CN 或名称含中文)
 
         Returns:
-            list: 筛选后的服务器列表
+            tuple[list, int]: (截断后的结果列表, 截断前的命中总数)
         """
-        ping_threshold = self.config.get("ping_threshold", 200)
-        min_players = self.config.get("min_players", 60)
-        max_results = self.config.get("max_results", 10)
-        cn_only = self.config.get("cn_only", True)
+        country_filter = {item.upper() for item in _as_str_list(countries)}
+        language_filter = {item.lower() for item in _as_str_list(languages)}
+        keyword = str(keyword or "").strip()
+        map_keyword = str(map_keyword or "").strip()
+        broad_query = not keyword
 
-        filtered = []
+        explicit_min = _as_int(min_players)
+        explicit_max = _as_int(max_players)
+        explicit_joinable = _as_bool(only_joinable)
+        explicit_empty = _as_bool(include_empty)
+        explicit_cn_only = _as_bool(cn_only)
+
+        configured_min = _as_int(self.config.get("min_players", 60)) or 0
+        configured_cn_only = bool(self.config.get("cn_only", True))
+
+        if broad_query:
+            effective_min = configured_min if explicit_min is None else explicit_min
+            keep_joinable = True if explicit_joinable is None else explicit_joinable
+            keep_empty = False if explicit_empty is None else explicit_empty
+            use_cn_only = (
+                configured_cn_only if explicit_cn_only is None else explicit_cn_only
+            )
+        else:
+            effective_min = explicit_min
+            keep_joinable = bool(explicit_joinable)
+            keep_empty = True if explicit_empty is None else explicit_empty
+            use_cn_only = (
+                configured_cn_only if explicit_cn_only is None else explicit_cn_only
+            )
+
+        result_limit = _as_int(limit)
+        if result_limit is None or result_limit <= 0:
+            result_limit = _as_int(self.config.get("max_results", 10)) or 10
+        result_limit = max(1, min(result_limit, MAX_RESULT_LIMIT))
+
+        matched = []
         for server in servers:
             try:
                 if not isinstance(server, dict):
                     continue
 
-                ping = int(server.get("ping", PING_UNKNOWN))
                 players = int(server.get("players", 0))
-                max_players = int(server.get("max_players", 0))
+                max_players_value = int(server.get("max_players", 0))
                 status = str(server.get("status", "")).lower()
-                queue = int(server.get("queue", 0))
 
                 if status != "online":
                     continue
@@ -372,29 +498,86 @@ class SquadServerStatusPlugin(Star):
                 if not name:
                     continue
 
-                if cn_only and not self._is_cn_server(server):
+                server_country = str(server.get("country", "")).upper()
+                server_language = str(server.get("language", "")).lower()
+                map_name = str(server.get("map", "")).lower()
+
+                if country_filter and server_country not in country_filter:
+                    continue
+                if (
+                    not country_filter
+                    and use_cn_only
+                    and not self._is_cn_server(server)
+                ):
                     continue
 
-                if keyword:
-                    if keyword.lower() not in name.lower():
-                        continue
-                else:
-                    if ping >= ping_threshold and ping != PING_UNKNOWN:
-                        continue
-                    if players < min_players:
-                        continue
-                    if players >= max_players:
-                        continue
-                    if queue > 0:
-                        continue
+                if language_filter and server_language not in language_filter:
+                    continue
+                if map_keyword and map_keyword.lower() not in map_name:
+                    continue
+                if keyword and keyword.lower() not in name.lower():
+                    continue
 
-                filtered.append(server)
+                if effective_min is not None and players < effective_min:
+                    continue
+                if explicit_max is not None and players > explicit_max:
+                    continue
+                if not keep_empty and players <= 0:
+                    continue
+                if keep_joinable and 0 < max_players_value <= players:
+                    continue
+
+                matched.append(server)
             except (ValueError, TypeError) as e:
                 logger.error(f"解析服务器数据出错: {e}")
                 continue
 
-        filtered.sort(key=lambda s: int(s.get("players", 0)), reverse=True)
-        return filtered[:max_results]
+        sort_field = str(sort_by or "").strip().lower()
+        if sort_field not in SORT_FIELDS:
+            sort_field = "players"
+        descending = str(order or "").strip().lower() not in (
+            "asc",
+            "ascending",
+            "升序",
+        )
+        matched.sort(key=lambda s: self._sort_value(s, sort_field), reverse=descending)
+
+        return matched[:result_limit], len(matched)
+
+    @staticmethod
+    def _sort_value(server, sort_field):
+        """取出排序用的字段值
+
+        Args:
+            server (dict): 服务器数据
+            sort_field (str): players / name / map / fill 之一
+
+        Returns:
+            int|str|float: 排序键
+        """
+        if sort_field == "name":
+            return str(server.get("name", ""))
+        if sort_field == "map":
+            return str(server.get("map", ""))
+        if sort_field == "fill":
+            max_players = int(server.get("max_players", 0) or 0)
+            players = int(server.get("players", 0) or 0)
+            return (players / max_players) if max_players > 0 else 0.0
+        return int(server.get("players", 0) or 0)
+
+    def filter_servers(self, servers, keyword=None, **options):
+        """筛选服务器列表(兼容旧调用方式)
+
+        Args:
+            servers (list): 服务器列表
+            keyword (str, optional): 搜索关键字
+            **options: 透传给 select_servers 的筛选参数
+
+        Returns:
+            list: 筛选后的服务器列表
+        """
+        selected, _ = self.select_servers(servers, keyword, **options)
+        return selected
 
     def _is_cn_server(self, server):
         """判断是否为国内服务器
@@ -426,11 +609,16 @@ class SquadServerStatusPlugin(Star):
                 return True
         return False
 
-    def format_server_info(self, server):
+    def format_server_info(
+        self, server, extra_fields=None, show_extra_fields=None, compact=False
+    ):
         """格式化服务器信息为可读文本
 
         Args:
             server (dict): 服务器数据
+            extra_fields (list, optional): 本次额外显示的字段，不传则用配置
+            show_extra_fields (bool, optional): 是否显示额外字段，不传则用配置
+            compact (bool): 为 True 时压成一行(名称+人数)，适合大 limit 查询
 
         Returns:
             str: 格式化后的服务器信息文本
@@ -441,48 +629,104 @@ class SquadServerStatusPlugin(Star):
         ping = int(server.get("ping", PING_UNKNOWN))
         queue = int(server.get("queue", 0))
 
+        if show_extra_fields is None:
+            show_extra_fields = bool(self.config.get("show_extra_fields", False))
+        if extra_fields is None:
+            extra_fields = self.config.get("extra_fields", []) or []
+        fields = [str(field).strip().lower() for field in extra_fields]
+
+        extra_values = []
+        if show_extra_fields:
+            if "map" in fields and server.get("map"):
+                extra_values.append(("🗺️", "地图", server["map"]))
+            if "mode" in fields and server.get("mode"):
+                extra_values.append(("⚔️", "模式", server["mode"]))
+            if "version" in fields and server.get("version"):
+                extra_values.append(("📦", "版本", server["version"]))
+            if "ip" in fields and server.get("ip"):
+                extra_values.append(
+                    ("🌐", "IP", f"{server['ip']}:{server.get('port', '')}")
+                )
+            if "country" in fields and server.get("country"):
+                extra_values.append(("🌍", "地区", server["country"]))
+            if "language" in fields and server.get("language"):
+                extra_values.append(("🗣️", "语言", server["language"]))
+
+        if compact:
+            parts = [f"🎮 {name}", f"👥 {players}/{max_players}"]
+            if queue > 0:
+                parts.append(f"排队 {queue}")
+            parts.extend(f"{emoji} {value}" for emoji, _, value in extra_values)
+            return " | ".join(parts)
+
         result = f"🎮 {name}\n"
         result += f"👥 {players}/{max_players}"
         if queue > 0:
             result += f" | 排队: {queue}"
         result += f"\n⏱️ Ping: {'未知' if ping >= PING_UNKNOWN else f'{ping}ms'}"
+        for emoji, label, value in extra_values:
+            result += f"\n{emoji} {label}: {value}"
 
-        if self.config.get("show_extra_fields", False):
-            extra_fields = self.config.get("extra_fields", [])
-
-            if "map" in extra_fields:
-                map_name = server.get("map", "")
-                if map_name:
-                    result += f"\n🗺️ 地图: {map_name}"
-
-            if "mode" in extra_fields:
-                mode = server.get("mode", "")
-                if mode:
-                    result += f"\n⚔️ 模式: {mode}"
-
-            if "version" in extra_fields:
-                version = server.get("version", "")
-                if version:
-                    result += f"\n📦 版本: {version}"
-
-            if "ip" in extra_fields:
-                ip = server.get("ip", "")
-                port = server.get("port", "")
-                if ip:
-                    result += f"\n🌐 IP: {ip}:{port}"
+        return result
 
         return result
 
     @filter.llm_tool(name="query_squad_server")
-    async def query_squad_server_tool(self, event, keyword: str = ""):
-        """查询战术小队(Squad)服务器状态
+    async def query_squad_server_tool(
+        self,
+        event,
+        keyword: str = "",
+        countries: list | None = None,
+        languages: list | None = None,
+        map_keyword: str = "",
+        min_players: int | None = None,
+        max_players: int | None = None,
+        limit: int | None = None,
+        sort_by: str = "",
+        order: str = "",
+        only_joinable: bool | None = None,
+        include_empty: bool | None = None,
+        cn_only: bool | None = None,
+        show_fields: list | None = None,
+        compact: bool = False,
+    ):
+        """查询战术小队(Squad)服务器实时状态。
+
+        接口只返回在线服务器，可自由组合名称、国别、语言、地图、人数等条件，
+        并指定返回条数与排序方式；不带任何参数时按插件配置返回"未满员且人数达标"的国内服。
 
         Args:
-            keyword (str): 服务器名称关键字，不填则返回所有活跃服务器
+            keyword (string): 服务器名称关键字(模糊匹配，不区分大小写)，留空表示不限名称
+            countries (array[string]): 国别代码列表，如 ["CN","US"]；传入后按服务器所在国家严格筛选并覆盖 cn_only
+            languages (array[string]): 语言代码列表，如 ["zh"] 查中文服、["en"] 查英文服
+            map_keyword (string): 地图名关键字，如 "Mutaha"
+            min_players (number): 最低当前人数；留空时无关键字查询用插件配置的门槛
+            max_players (number): 最高当前人数
+            limit (number): 返回条数上限(1-100)；留空用插件配置(默认10)
+            sort_by (string): 排序字段，可选 players(人数，默认)/name(名称)/map(地图)/fill(满员度)
+            order (string): 排序方向，可选 desc(降序，默认)/asc(升序)
+            only_joinable (boolean): 是否只返回未满员(还能进)的服务器；留空时无关键字查询默认为 true
+            include_empty (boolean): 是否包含 0 人的服务器；留空时带关键字查询默认为 true
+            cn_only (boolean): 是否只看国内服(country 为 CN 或名称含中文)；留空用插件配置
+            show_fields (array[string]): 额外显示字段，可选 map/mode/version/ip/country/language
+            compact (boolean): true 时每台服务器只输出一行(名称+人数)，适合一次查询较多服务器
         """
-        if keyword == "":
-            keyword = None
-        results = await self.handle_query(keyword)
+        options = {
+            "countries": _as_str_list(countries),
+            "languages": _as_str_list(languages),
+            "map_keyword": map_keyword,
+            "min_players": min_players,
+            "max_players": max_players,
+            "limit": limit,
+            "sort_by": sort_by,
+            "order": order,
+            "only_joinable": only_joinable,
+            "include_empty": include_empty,
+            "cn_only": cn_only,
+            "show_fields": _as_str_list(show_fields),
+            "compact": compact,
+        }
+        results = await self.handle_query(str(keyword).strip() or None, **options)
         return "\n".join(results)
 
     @filter.command("squad_server")
@@ -501,37 +745,68 @@ class SquadServerStatusPlugin(Star):
         for result in results:
             yield event.plain_result(result)
 
-    async def handle_query(self, keyword=None):
+    async def handle_query(self, keyword=None, **options):
         """处理服务器查询请求
 
-        获取服务器列表，筛选并格式化结果。
+        获取服务器列表，按选项筛选并格式化结果。
 
         Args:
             keyword (str, optional): 搜索关键字
+            **options: 查询选项，透传给 select_servers(limit/countries/min_players 等)
+                以及 format_server_info(show_fields/compact)
 
         Returns:
             list[str]: 格式化后的服务器信息列表
         """
-        logger.info(f"查询Squad服务器状态, 关键字: {keyword}")
+        logger.info(f"查询Squad服务器状态, 关键字: {keyword}, 选项: {options}")
 
         servers = await self.fetch_servers()
 
         if not servers:
             return ["查询失败，请稍后重试"]
 
-        filtered = self.filter_servers(servers, keyword)
+        format_options = {"compact": bool(_as_bool(options.get("compact")))}
+        show_fields = _as_str_list(options.get("show_fields"))
+        if show_fields:
+            unknown_fields = [
+                field for field in show_fields if field not in EXTRA_FIELD_CHOICES
+            ]
+            if unknown_fields:
+                logger.warning(f"忽略不支持的显示字段: {unknown_fields}")
+            chosen_fields = [
+                field for field in show_fields if field in EXTRA_FIELD_CHOICES
+            ]
+            if chosen_fields:
+                format_options["extra_fields"] = chosen_fields
+                format_options["show_extra_fields"] = True
 
-        if not filtered:
+        filter_keys = (
+            "countries",
+            "languages",
+            "map_keyword",
+            "min_players",
+            "max_players",
+            "limit",
+            "sort_by",
+            "order",
+            "only_joinable",
+            "include_empty",
+            "cn_only",
+        )
+        filter_options = {key: options[key] for key in filter_keys if key in options}
+
+        selected, total = self.select_servers(servers, keyword, **filter_options)
+
+        if not selected:
             if keyword:
                 return [f"未找到匹配 '{keyword}' 的服务器"]
-            else:
-                return ["未找到符合条件的服务器"]
+            return ["未找到符合条件的服务器"]
 
-        result_lines = []
-        for i, server in enumerate(filtered, 1):
-            info = self.format_server_info(server)
-            result_lines.append(f"--- [{i}] ---")
-            result_lines.append(info)
+        result_lines = [f"🔎 命中 {total} 台，返回 {len(selected)} 台"]
+        for i, server in enumerate(selected, 1):
+            if not format_options["compact"]:
+                result_lines.append(f"--- [{i}] ---")
+            result_lines.append(self.format_server_info(server, **format_options))
 
         result = "\n".join(result_lines)
 

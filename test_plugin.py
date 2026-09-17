@@ -370,6 +370,259 @@ def test_handle_query():
     )
 
 
+# ---------------------------------------------------------------- LLM 工具参数
+def test_tool_parameters():
+    plugin, module = make_plugin(min_players=60, max_results=10)
+    servers = [
+        plugin.normalize_server_data(
+            gm_item(name="[CN] 满员大服", numplayers=100, maxplayers=100, ip="1.1.1.1")
+        ),
+        plugin.normalize_server_data(
+            gm_item(
+                name="[US] Big One",
+                country="US",
+                language="en",
+                numplayers=90,
+                maxplayers=100,
+                ip="2.2.2.2",
+            )
+        ),
+        plugin.normalize_server_data(
+            gm_item(name="[CN] 小服", numplayers=20, maxplayers=100, ip="3.3.3.3")
+        ),
+        plugin.normalize_server_data(
+            gm_item(name="[CN] 空服", numplayers=0, maxplayers=100, ip="4.4.4.4")
+        ),
+        plugin.normalize_server_data(
+            gm_item(
+                name="[CN] 中文服",
+                language="zh",
+                map="Mutaha_RAAS_v1",
+                numplayers=70,
+                maxplayers=100,
+                ip="5.5.5.5",
+            )
+        ),
+    ]
+
+    # 默认(无关键字): 国内 + 未满员 + 人数>=60
+    selected, total = plugin.select_servers(servers, None)
+    check(
+        "参数: 默认查询沿用配置门槛",
+        [s["name"] for s in selected] == ["[CN] 中文服"] and total == 1,
+        f"{[s['name'] for s in selected]} / {total}",
+    )
+
+    # limit 覆盖配置的 max_results，并回报命中总数
+    wide = {"min_players": 0, "only_joinable": False}
+    selected, total = plugin.select_servers(servers, None, limit=2, **wide)
+    check(
+        "参数: limit 生效且回报命中总数",
+        len(selected) == 2 and total == 3,
+        f"返回 {len(selected)} / 命中 {total}",
+    )
+
+    # countries 覆盖 cn_only（能查国外服）
+    selected, _ = plugin.select_servers(servers, None, countries=["US"])
+    check(
+        "参数: countries 覆盖 cn_only 后能查境外服",
+        [s["name"] for s in selected] == ["[US] Big One"],
+        str([s["name"] for s in selected]),
+    )
+    selected, _ = plugin.select_servers(servers, None, countries="us")
+    check("参数: countries 支持字符串写法与大小写", len(selected) == 1)
+
+    # include_empty 放开 0 人服务器
+    selected, total = plugin.select_servers(servers, None, include_empty=True, **wide)
+    check(
+        "参数: include_empty 放行 0 人服务器",
+        total == 4 and any(s["players"] == 0 for s in selected),
+        f"命中 {total}",
+    )
+
+    # 关键字查询仍不受人数门槛限制(旧行为)
+    selected, _ = plugin.select_servers(servers, "小服")
+    check("参数: 关键字查询仍忽略默认人数门槛", len(selected) == 1, str(selected))
+
+    # 显式 min_players 在关键字查询下同样生效
+    selected, total = plugin.select_servers(servers, "小服", min_players=50)
+    check("参数: 关键字查询下显式 min_players 生效", not selected and total == 0)
+
+    # max_players
+    selected, _ = plugin.select_servers(servers, None, max_players=50, **wide)
+    check(
+        "参数: max_players 生效",
+        [s["name"] for s in selected] == ["[CN] 小服"],
+        str([s["name"] for s in selected]),
+    )
+
+    # map_keyword / languages
+    selected, _ = plugin.select_servers(servers, None, map_keyword="mutaha")
+    check(
+        "参数: map_keyword 生效",
+        [s["name"] for s in selected] == ["[CN] 中文服"],
+        str([s["name"] for s in selected]),
+    )
+    selected, _ = plugin.select_servers(servers, None, languages=["en"], cn_only=False)
+    check(
+        "参数: languages 生效",
+        [s["name"] for s in selected] == ["[US] Big One"],
+        str([s["name"] for s in selected]),
+    )
+
+    # 排序
+    selected, _ = plugin.select_servers(
+        servers,
+        None,
+        countries=["CN"],
+        sort_by="name",
+        order="asc",
+        include_empty=True,
+        **wide,
+    )
+    names = [s["name"] for s in selected]
+    check("参数: sort_by=name + order=asc", names == sorted(names), str(names))
+
+    selected, _ = plugin.select_servers(
+        servers, None, sort_by="fill", cn_only=False, min_players=0, only_joinable=False
+    )
+    check(
+        "参数: sort_by=fill 按满员度排序",
+        selected[0]["name"] == "[CN] 满员大服",
+        str([s["name"] for s in selected]),
+    )
+
+    # 非法参数不抛异常，回退默认
+    selected, _ = plugin.select_servers(
+        servers,
+        None,
+        sort_by="不存在的字段",
+        order="乱写",
+        limit="abc",
+        cn_only="不知道",
+    )
+    check("参数: 非法入参回退默认而不报错", len(selected) == 1, str(selected))
+
+    # limit 硬上限
+    many = [
+        plugin.normalize_server_data(
+            gm_item(
+                name=f"[CN] 服{i}", numplayers=80, maxplayers=100, ip=f"1.1.1.{i % 250}"
+            )
+        )
+        for i in range(150)
+    ]
+    selected, total = plugin.select_servers(many, None, countries=["CN"], limit=9999)
+    check(
+        "参数: limit 受硬上限约束",
+        len(selected) == module.MAX_RESULT_LIMIT and total == 150,
+        f"返回 {len(selected)} / 命中 {total}",
+    )
+
+
+def test_tool_output():
+    plugin, _ = make_plugin(min_players=60, max_results=10)
+    plugin.session = FakeSession(
+        [
+            {
+                "response": {
+                    "items": [
+                        gm_item(
+                            name="[US] Big One",
+                            country="US",
+                            language="en",
+                            numplayers=90,
+                            maxplayers=100,
+                        ),
+                        gm_item(
+                            name="[CN] 中文服",
+                            language="zh",
+                            numplayers=70,
+                            maxplayers=100,
+                            ip="5.5.5.5",
+                        ),
+                    ]
+                }
+            }
+        ]
+    )
+
+    text = asyncio.run(
+        plugin.query_squad_server_tool(
+            None,
+            countries=["US", "CN"],
+            limit=5,
+            compact=True,
+            show_fields=["country", "language"],
+        )
+    )
+    check("工具: compact 一行一台", text.count("🎮") == 2, text.replace("\n", " / "))
+    check(
+        "工具: compact 下 show_fields 以简短形式附在行内",
+        "🌍 US" in text and "🗣️ en" in text,
+        text.replace("\n", " / "),
+    )
+
+    verbose = asyncio.run(
+        plugin.query_squad_server_tool(
+            None, countries=["US"], show_fields=["country", "language"]
+        )
+    )
+    check(
+        "工具: 非 compact 下 show_fields 带字段名",
+        "🌍 地区: US" in verbose and "🗣️ 语言: en" in verbose,
+        verbose.replace("\n", " / "),
+    )
+    check("工具: 输出命中总数", "命中 2 台" in text)
+
+    text_us = asyncio.run(plugin.query_squad_server_tool(None, countries=["US"]))
+    check(
+        "工具: countries 参数可只查美国服",
+        "Big One" in text_us and "中文服" not in text_us,
+        text_us.replace("\n", " / "),
+    )
+
+    empty = asyncio.run(plugin.query_squad_server_tool(None, keyword="不存在的服务器"))
+    check(
+        "工具: 无匹配时返回提示",
+        empty == "未找到匹配 '不存在的服务器' 的服务器",
+        empty,
+    )
+
+
+def test_tool_docstring_contract():
+    """AstrBot 只解析 docstring 的参数与类型，写错会静默丢参数。"""
+    import inspect
+    import re as _re
+
+    plugin, _ = make_plugin()
+    func = plugin.query_squad_server_tool
+    params = [
+        name
+        for name in inspect.signature(func).parameters
+        if name not in ("self", "event")
+    ]
+    args_block = (func.__doc__ or "").split("Args:")[-1]
+    documented = dict(_re.findall(r"(\w+) \((\w+(?:\[\w+\])?)\)", args_block))
+
+    missing = [name for name in params if name not in documented]
+    check("工具: 每个参数都在 docstring 中标注类型", not missing, str(missing))
+
+    supported = ("string", "number", "boolean", "array", "object")
+    bad = {
+        name: type_name
+        for name, type_name in documented.items()
+        if type_name.split("[")[0] not in supported
+    }
+    check("工具: 参数类型均在 AstrBot 支持列表内", not bad, str(bad))
+
+    check(
+        "工具: 已开放 limit / countries / sort_by",
+        {"limit", "countries", "sort_by", "order", "show_fields"} <= set(documented),
+        str(sorted(documented)),
+    )
+
+
 def main():
     for test in (
         test_normalize_fields,
@@ -381,6 +634,9 @@ def main():
         test_fetch_failure,
         test_format,
         test_handle_query,
+        test_tool_parameters,
+        test_tool_output,
+        test_tool_docstring_contract,
     ):
         print(f"\n--- {test.__name__} ---")
         test()
